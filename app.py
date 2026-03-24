@@ -70,17 +70,24 @@ model.eval()
 print('Model loaded.')
 
 # ── TTA transforms ────────────────────────────────────────────────────
+# tta_tfms = [
+#     T.Compose([T.Resize((IMG_SIZE,IMG_SIZE)), T.ToTensor(),
+#                T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
+#     T.Compose([T.Resize((IMG_SIZE,IMG_SIZE)), T.RandomHorizontalFlip(p=1.0),
+#                T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
+#     T.Compose([T.Resize((int(IMG_SIZE*1.15),int(IMG_SIZE*1.15))), T.CenterCrop(IMG_SIZE),
+#                T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
+#     T.Compose([T.Resize((int(IMG_SIZE*1.3),int(IMG_SIZE*1.3))), T.CenterCrop(IMG_SIZE),
+#                T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
+#     T.Compose([T.Resize((IMG_SIZE,IMG_SIZE)),
+#                T.ColorJitter(brightness=0.15,contrast=0.15),
+#                T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
+# ]
+
 tta_tfms = [
     T.Compose([T.Resize((IMG_SIZE,IMG_SIZE)), T.ToTensor(),
                T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
     T.Compose([T.Resize((IMG_SIZE,IMG_SIZE)), T.RandomHorizontalFlip(p=1.0),
-               T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
-    T.Compose([T.Resize((int(IMG_SIZE*1.15),int(IMG_SIZE*1.15))), T.CenterCrop(IMG_SIZE),
-               T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
-    T.Compose([T.Resize((int(IMG_SIZE*1.3),int(IMG_SIZE*1.3))), T.CenterCrop(IMG_SIZE),
-               T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
-    T.Compose([T.Resize((IMG_SIZE,IMG_SIZE)),
-               T.ColorJitter(brightness=0.15,contrast=0.15),
                T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]),
 ]
 
@@ -113,9 +120,20 @@ def nms(dets, iou_thresh=0.4):
         dets = [d for d in dets if iou(best['box'], d['box']) < iou_thresh]
     return kept
 
+# def get_windows(W, H):
+#     wins = [(0, 0, W, H)]
+#     for scale in [0.5, 0.6, 0.75]:
+#         ww, wh = int(W*scale), int(H*scale)
+#         sx, sy = max(1, ww//2), max(1, wh//2)
+#         for y in range(0, H-wh+1, sy):
+#             for x in range(0, W-ww+1, sx):
+#                 wins.append((x, y, x+ww, y+wh))
+#     return wins
+
+
 def get_windows(W, H):
     wins = [(0, 0, W, H)]
-    for scale in [0.5, 0.6, 0.75]:
+    for scale in [0.6, 0.75]:  # removed 0.5
         ww, wh = int(W*scale), int(H*scale)
         sx, sy = max(1, ww//2), max(1, wh//2)
         for y in range(0, H-wh+1, sy):
