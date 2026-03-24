@@ -13,24 +13,14 @@ from flask_cors import CORS
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+CORS(app, origins="*", allow_headers=["Content-Type"], methods=["GET", "POST", "OPTIONS"])
 
 @app.after_request
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+def after_request(response):
+    response.headers.set('Access-Control-Allow-Origin', '*')
+    response.headers.set('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     return response
-
-@app.route('/predict', methods=['OPTIONS'])
-@app.route('/health', methods=['OPTIONS'])
-@app.route('/', methods=['OPTIONS'])
-def options_handler():
-    response = jsonify({'status': 'ok'})
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response, 200
 
 # ── Config ────────────────────────────────────────────────────────────
 IMG_SIZE   = 224
@@ -38,7 +28,7 @@ DEVICE     = torch.device('cpu')
 MODEL_NAME = os.environ.get('MODEL_NAME', 'efficientnet')
 CKPT_PATH  = os.environ.get('CKPT_PATH', 'model/efficientnet_best.pth')
 CLASS_PATH = os.environ.get('CLASS_PATH', 'model/selected_classes_efficientnet.txt')
-MAX_DIM    = 480   # smaller = faster, still accurate enough
+MAX_DIM    = 380
 
 # ── Load classes ──────────────────────────────────────────────────────
 with open(CLASS_PATH) as f:
@@ -83,15 +73,9 @@ print(f'Loading model: {MODEL_NAME} from {CKPT_PATH}')
 model = build_model(MODEL_NAME, NUM_CLASSES)
 model.load_state_dict(torch.load(CKPT_PATH, map_location=DEVICE))
 model.eval()
-# Torch compile for faster CPU inference (PyTorch 2.x)
-try:
-    model = torch.compile(model, mode='reduce-overhead')
-    print('Model compiled with torch.compile')
-except Exception:
-    print('torch.compile unavailable, using standard model')
 print('Model ready.')
 
-# ── Single transform (no TTA — speed priority) ────────────────────────
+# ── Transform ─────────────────────────────────────────────────────────
 tfm = T.Compose([
     T.Resize((IMG_SIZE, IMG_SIZE)),
     T.ToTensor(),
@@ -99,46 +83,18 @@ tfm = T.Compose([
 ])
 
 def batch_predict(crops):
-    """Run all crops through the model in ONE forward pass."""
     if not crops:
         return np.array([])
     batch = torch.stack([tfm(c) for c in crops]).to(DEVICE)
     with torch.no_grad():
-        logits = model(batch)
-        # Temperature scaling = 1.5 gives better calibrated confidence
-        probs  = torch.softmax(logits / 1.5, dim=1).cpu().numpy()
+        probs = torch.softmax(model(batch) / 1.5, dim=1).cpu().numpy()
     return probs
 
-# ── Smart crop strategy ───────────────────────────────────────────────
+# ── Smart crops ───────────────────────────────────────────────────────
 def get_crops(img):
-    """
-    Returns list of (crop_pil, box) tuples.
-    Strategy:
-      1. Full image always included
-      2. If image is wide/tall enough: 4 quadrant crops
-      3. 2 horizontal half-crops (top/bottom) for dishes laid side by side
-    Total = 7 crops max, all run in ONE batched forward pass.
-    """
+    # Single full image only — fastest on free tier CPU
     W, H = img.size
-    crops_and_boxes = [(img, (0, 0, W, H))]
-
-    # Only add sub-crops if image is large enough to be meaningful
-    if W >= 200 and H >= 200:
-        hw, hh = W // 2, H // 2
-        quads = [
-            (0,  0,  hw, hh),   # top-left
-            (hw, 0,  W,  hh),   # top-right
-            (0,  hh, hw, H),    # bottom-left
-            (hw, hh, W,  H),    # bottom-right
-        ]
-        for box in quads:
-            crops_and_boxes.append((img.crop(box), box))
-
-        # Horizontal halves (good for side-by-side dishes)
-        crops_and_boxes.append((img.crop((0, 0, W, hh)), (0, 0, W, hh)))
-        crops_and_boxes.append((img.crop((0, hh, W, H)), (0, hh, W, H)))
-
-    return crops_and_boxes
+    return [(img, (0, 0, W, H))]
 
 # ── NMS ───────────────────────────────────────────────────────────────
 def iou(a, b):
@@ -159,13 +115,12 @@ def nms(dets, iou_thresh=0.45):
         dets = [d for d in dets if iou(best['box'], d['box']) < iou_thresh]
     return kept
 
-# ── Local nutrition table (per 100g) — no API call needed ────────────
-# Format: cal, protein, carbs, fat
+# ── Local nutrition DB (per 100g): cal, protein, carbs, fat ──────────
 NUTRITION_DB = {
     'aloo paratha':     (200, 4.5, 28.0, 8.0),
-    'anda curry':       (165, 11.0, 6.0, 11.0),
-    'biryani':          (180, 8.0, 25.0, 5.5),
-    'chana masala':     (150, 7.5, 20.0, 4.5),
+    'anda curry':       (165, 11.0, 6.0,  11.0),
+    'biryani':          (180, 8.0,  25.0, 5.5),
+    'chana masala':     (150, 7.5,  20.0, 4.5),
     'chicken pizza':    (270, 13.0, 30.0, 11.0),
     'chicken wings':    (290, 24.0, 0.0,  21.0),
     'garlic bread':     (310, 7.0,  45.0, 11.0),
@@ -183,41 +138,37 @@ NUTRITION_DB = {
     'uttapam':          (150, 4.5,  26.0, 3.0),
     'vada pav':         (290, 6.5,  42.0, 10.0),
 }
-FALLBACK_NUTRITION = (200, 5.0, 30.0, 7.0)
+FALLBACK = (200, 5.0, 30.0, 7.0)
 
 def get_nutrition(food, portion_g=150):
-    key   = food.lower().strip()
-    base  = NUTRITION_DB.get(key, FALLBACK_NUTRITION)
-    s     = portion_g / 100
-    src   = 'NutriLens DB' if key in NUTRITION_DB else 'Estimated'
+    key  = food.lower().strip()
+    base = NUTRITION_DB.get(key, FALLBACK)
+    s    = portion_g / 100
     return {
         'calories':  round(base[0] * s),
         'protein':   round(base[1] * s, 1),
         'carbs':     round(base[2] * s, 1),
         'fat':       round(base[3] * s, 1),
         'portion_g': portion_g,
-        'source':    src
+        'source':    'NutriLens DB' if key in NUTRITION_DB else 'Estimated'
     }
 
 # ── Colors ────────────────────────────────────────────────────────────
 COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6',
           '#1abc9c','#e67e22','#e91e63','#00bcd4','#8e44ad']
 
-# ── Main detect function ──────────────────────────────────────────────
+# ── Detect ────────────────────────────────────────────────────────────
 def detect(pil_image, conf_thresh=0.55):
     W, H = pil_image.size
-
-    # Get all crops and run ONE batched forward pass
     crops_and_boxes = get_crops(pil_image)
-    crops  = [c for c, _ in crops_and_boxes]
-    boxes  = [b for _, b in crops_and_boxes]
-    probs  = batch_predict(crops)   # shape: (N, num_classes)
+    crops = [c for c, _ in crops_and_boxes]
+    boxes = [b for _, b in crops_and_boxes]
+    probs = batch_predict(crops)
 
-    # Filter by confidence threshold
     raw = []
-    for i, (box, prob) in enumerate(zip(boxes, probs)):
-        top_i  = int(np.argmax(prob))
-        conf   = float(prob[top_i])
+    for box, prob in zip(boxes, probs):
+        top_i = int(np.argmax(prob))
+        conf  = float(prob[top_i])
         if conf >= conf_thresh:
             top3_i = np.argsort(prob)[-3:][::-1]
             raw.append({
@@ -229,9 +180,8 @@ def detect(pil_image, conf_thresh=0.55):
 
     kept = nms(raw, iou_thresh=0.45)
 
-    # If nothing passed threshold, return best single guess from full image
     if not kept:
-        prob   = probs[0]   # full image is always index 0
+        prob   = probs[0]
         top_i  = int(np.argmax(prob))
         top3_i = np.argsort(prob)[-3:][::-1]
         kept   = [{
@@ -241,7 +191,6 @@ def detect(pil_image, conf_thresh=0.55):
             'top3': [(selected[j], round(float(prob[j])*100, 1)) for j in top3_i]
         }]
 
-    # Annotate image
     ann  = pil_image.copy()
     draw = ImageDraw.Draw(ann)
     try:
@@ -253,30 +202,24 @@ def detect(pil_image, conf_thresh=0.55):
     results = []
     for i, d in enumerate(kept):
         x1, y1, x2, y2 = d['box']
-        area      = (x2-x1) * (y2-y1)
-        ratio     = area / (W * H)
-        portion_g = max(50, min(400, int(300 * ratio * 4)))
+        ratio     = ((x2-x1)*(y2-y1)) / (W*H)
+        portion_g = max(50, min(400, int(300*ratio*4)))
         nut       = get_nutrition(d['food'], portion_g)
         col       = COLORS[i % len(COLORS)]
-
-        # Draw box
         for t in range(3):
             draw.rectangle([x1-t, y1-t, x2+t, y2+t], outline=col)
-
-        # Draw label
         l1 = f"{i+1}. {d['food'].replace('_',' ').title()}  {d['conf']*100:.0f}%"
-        l2 = f"{nut['calories']} kcal  |  {nut['protein']}g P  {nut['carbs']}g C  {nut['fat']}g F"
-        ly = max(0, y1 - 50)
+        l2 = f"{nut['calories']} kcal | {nut['protein']}g P  {nut['carbs']}g C  {nut['fat']}g F"
+        ly = max(0, y1-50)
         bw = max(len(l1), len(l2)) * 7 + 14
         draw.rectangle([x1, ly, x1+bw, ly+48], fill=col)
         draw.text((x1+6, ly+4),  l1, fill='white', font=font_big)
         draw.text((x1+6, ly+26), l2, fill='white', font=font_small)
-
         results.append({
-            'id':           i + 1,
+            'id':           i+1,
             'food':         d['food'],
             'food_display': d['food'].replace('_', ' ').title(),
-            'confidence':   round(d['conf'] * 100, 1),
+            'confidence':   round(d['conf']*100, 1),
             'top3':         d['top3'],
             'box':          list(d['box']),
             'color':        col,
@@ -288,20 +231,22 @@ def detect(pil_image, conf_thresh=0.55):
     return results, base64.b64encode(buf.getvalue()).decode()
 
 # ── Routes ────────────────────────────────────────────────────────────
-@app.route('/', methods=['GET'])
+@app.route('/', methods=['GET', 'OPTIONS'])
 def index():
     return jsonify({'name': 'NutriLens API', 'model': MODEL_NAME, 'classes': NUM_CLASSES})
 
-@app.route('/health', methods=['GET'])
+@app.route('/health', methods=['GET', 'OPTIONS'])
 def health():
     return jsonify({'status': 'ok', 'model': MODEL_NAME, 'classes': NUM_CLASSES})
 
-@app.route('/classes', methods=['GET'])
+@app.route('/classes', methods=['GET', 'OPTIONS'])
 def get_classes():
     return jsonify({'classes': selected})
 
-@app.route('/predict', methods=['POST'])
+@app.route('/predict', methods=['POST', 'OPTIONS'])
 def predict():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
     try:
         data = request.get_json()
         if not data or 'image' not in data:
@@ -312,11 +257,10 @@ def predict():
             img_b64 = img_b64.split(',')[1]
         pil_img = Image.open(io.BytesIO(base64.b64decode(img_b64))).convert('RGB')
 
-        # Resize for speed
         if max(pil_img.size) > MAX_DIM:
             ratio   = MAX_DIM / max(pil_img.size)
             pil_img = pil_img.resize(
-                (int(pil_img.width * ratio), int(pil_img.height * ratio)),
+                (int(pil_img.width*ratio), int(pil_img.height*ratio)),
                 Image.LANCZOS
             )
 

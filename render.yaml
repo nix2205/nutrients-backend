@@ -3,7 +3,7 @@ services:
     name: nutrilens-api
     runtime: python
     buildCommand: pip install --no-cache-dir -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --timeout 120 --bind 0.0.0.0:$PORT
+    startCommand: gunicorn app:app --workers 1 --timeout 300 --bind 0.0.0.0:$PORT --worker-class sync --max-requests 10 --max-requests-jitter 5
     envVars:
       - key: MODEL_NAME
         value: efficientnet
@@ -11,13 +11,3 @@ services:
         value: model/efficientnet_best.pth
       - key: CLASS_PATH
         value: model/selected_classes_efficientnet.txt
-    headers:
-      - path: /*
-        name: Access-Control-Allow-Origin
-        value: "*"
-      - path: /*
-        name: Access-Control-Allow-Methods
-        value: "GET, POST, OPTIONS"
-      - path: /*
-        name: Access-Control-Allow-Headers
-        value: "Content-Type"
