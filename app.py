@@ -23,7 +23,7 @@ IMG_SIZE   = 224
 DEVICE     = torch.device('cpu')  # Render free tier has no GPU
 MODEL_NAME = os.environ.get('MODEL_NAME', 'efficientnet')
 CKPT_PATH  = os.environ.get('CKPT_PATH', 'model/efficientnet_best.pth')
-CLASS_PATH = os.environ.get('CLASS_PATH', 'model/selected_classes.txt')
+CLASS_PATH = os.environ.get('CLASS_PATH', 'model/selected_classes_efficient.txt')
 
 # ── Load classes ──────────────────────────────────────────────────────
 with open(CLASS_PATH) as f:
