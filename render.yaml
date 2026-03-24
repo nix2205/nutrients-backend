@@ -2,16 +2,22 @@ services:
   - type: web
     name: nutrilens-api
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --timeout 120
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --timeout 120 --bind 0.0.0.0:$PORT
     envVars:
       - key: MODEL_NAME
         value: efficientnet
       - key: CKPT_PATH
         value: model/efficientnet_best.pth
       - key: CLASS_PATH
-        value: model/selected_classes.txt
-    disk:
-      name: model-storage
-      mountPath: /opt/render/project/src/model
-      sizeGB: 1
+        value: model/selected_classes_efficientnet.txt
+    headers:
+      - path: /*
+        name: Access-Control-Allow-Origin
+        value: "*"
+      - path: /*
+        name: Access-Control-Allow-Methods
+        value: "GET, POST, OPTIONS"
+      - path: /*
+        name: Access-Control-Allow-Headers
+        value: "Content-Type"
