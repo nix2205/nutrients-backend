@@ -149,24 +149,55 @@
 # COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6',
 #           '#1abc9c','#e67e22','#e91e63','#00bcd4','#8e44ad']
 
+# # ── Sliding window regions ────────────────────────────────────────────
+# def get_windows(W, H):
+#     """Full image + sliding windows at 3 scales with 50% overlap."""
+#     wins = [(0, 0, W, H)]
+#     for scale in [0.5, 0.65, 0.8]:
+#         ww, wh = int(W * scale), int(H * scale)
+#         step_x = max(1, ww // 2)
+#         step_y = max(1, wh // 2)
+#         for y in range(0, H - wh + 1, step_y):
+#             for x in range(0, W - ww + 1, step_x):
+#                 wins.append((x, y, x + ww, y + wh))
+#     return wins
+
 # # ── Detect ────────────────────────────────────────────────────────────
 # def detect(pil_image, conf_thresh=0.55):
 #     W, H = pil_image.size
 
-#     # Full image prediction
-#     prob   = predict_single(pil_image)
-#     top_i  = int(np.argmax(prob))
-#     conf   = float(prob[top_i])
-#     top3_i = np.argsort(prob)[-3:][::-1]
+#     # Scan all windows
+#     raw = []
+#     for box in get_windows(W, H):
+#         crop  = pil_image.crop(box)
+#         prob  = predict_single(crop)
+#         top_i = int(np.argmax(prob))
+#         conf  = float(prob[top_i])
+#         if conf >= conf_thresh:
+#             top3_i = np.argsort(prob)[-3:][::-1]
+#             raw.append({
+#                 'box':  box,
+#                 'food': selected[top_i],
+#                 'conf': conf,
+#                 'top3': [(selected[j], round(float(prob[j])*100, 1)) for j in top3_i]
+#             })
 
-#     kept = [{
-#         'box':  (0, 0, W, H),
-#         'food': selected[top_i],
-#         'conf': conf,
-#         'top3': [(selected[j], round(float(prob[j])*100, 1)) for j in top3_i]
-#     }]
+#     # NMS removes overlapping duplicates
+#     kept = nms(raw, iou_thresh=0.45)
 
-#     # Annotate
+#     # Fallback: nothing detected — use full image top prediction
+#     if not kept:
+#         prob   = predict_single(pil_image)
+#         top_i  = int(np.argmax(prob))
+#         top3_i = np.argsort(prob)[-3:][::-1]
+#         kept   = [{
+#             'box':  (0, 0, W, H),
+#             'food': selected[top_i],
+#             'conf': float(prob[top_i]),
+#             'top3': [(selected[j], round(float(prob[j])*100, 1)) for j in top3_i]
+#         }]
+
+#     # Annotate image
 #     ann  = pil_image.copy()
 #     draw = ImageDraw.Draw(ann)
 #     try:
@@ -178,7 +209,8 @@
 #     results = []
 #     for i, d in enumerate(kept):
 #         x1, y1, x2, y2 = d['box']
-#         portion_g = 150
+#         ratio     = ((x2 - x1) * (y2 - y1)) / (W * H)
+#         portion_g = max(50, min(400, int(300 * ratio * 4)))
 #         nut = get_nutrition(d['food'], portion_g)
 #         col = COLORS[i % len(COLORS)]
 #         for t in range(3):
@@ -360,24 +392,49 @@ def predict_single(img):
         probs = torch.softmax(model(t) / 1.5, dim=1).cpu().numpy()[0]
     return probs
 
-# ── NMS ───────────────────────────────────────────────────────────────
+# ── IoU helper ────────────────────────────────────────────────────────
 def iou(a, b):
-    ax1,ay1,ax2,ay2 = a; bx1,by1,bx2,by2 = b
-    ix1,iy1 = max(ax1,bx1), max(ay1,by1)
-    ix2,iy2 = min(ax2,bx2), min(ay2,by2)
-    inter = max(0, ix2-ix1) * max(0, iy2-iy1)
-    union = (ax2-ax1)*(ay2-ay1)+(bx2-bx1)*(by2-by1)-inter
-    return inter/union if union > 0 else 0
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    union = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter
+    return inter / union if union > 0 else 0
 
-def nms(dets, iou_thresh=0.45):
-    if not dets: return []
+# ── Class-aware NMS ───────────────────────────────────────────────────
+def nms(dets, iou_thresh=0.30):
+    """
+    Class-aware NMS:
+    - Same food label + IoU > 0.15  → always suppress (duplicate region)
+    - Different food label + IoU > 0.30 → suppress (heavily overlapping)
+    """
+    if not dets:
+        return []
     dets = sorted(dets, key=lambda x: x['conf'], reverse=True)
     kept = []
     while dets:
         best = dets.pop(0)
         kept.append(best)
-        dets = [d for d in dets if iou(best['box'], d['box']) < iou_thresh]
+        dets = [
+            d for d in dets
+            if not (
+                (d['food'] == best['food'] and iou(best['box'], d['box']) > 0.15)
+                or
+                (d['food'] != best['food'] and iou(best['box'], d['box']) >= iou_thresh)
+            )
+        ]
     return kept
+
+# ── Deduplicate: one entry per food label ─────────────────────────────
+def deduplicate_by_class(dets):
+    """Keep only the highest-confidence detection per food label."""
+    seen = {}
+    for d in dets:
+        food = d['food']
+        if food not in seen or d['conf'] > seen[food]['conf']:
+            seen[food] = d
+    return list(seen.values())
 
 # ── Local nutrition DB (per 100g): cal, protein, carbs, fat ──────────
 NUTRITION_DB = {
@@ -423,22 +480,36 @@ COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6',
 
 # ── Sliding window regions ────────────────────────────────────────────
 def get_windows(W, H):
-    """Full image + sliding windows at 3 scales with 50% overlap."""
+    """
+    Full image + 4 quadrants + one 75%-scale pass at 25% stride.
+    Fewer windows = fewer duplicate detections to filter.
+    """
     wins = [(0, 0, W, H)]
-    for scale in [0.5, 0.65, 0.8]:
-        ww, wh = int(W * scale), int(H * scale)
-        step_x = max(1, ww // 2)
-        step_y = max(1, wh // 2)
-        for y in range(0, H - wh + 1, step_y):
-            for x in range(0, W - ww + 1, step_x):
-                wins.append((x, y, x + ww, y + wh))
+
+    # 4 quadrants
+    hw, hh = W // 2, H // 2
+    wins += [
+        (0,  0,  hw, hh),
+        (hw, 0,  W,  hh),
+        (0,  hh, hw, H),
+        (hw, hh, W,  H),
+    ]
+
+    # 75% scale with 25% stride
+    scale = 0.75
+    ww, wh = int(W * scale), int(H * scale)
+    step_x = max(1, ww // 4)
+    step_y = max(1, wh // 4)
+    for y in range(0, H - wh + 1, step_y):
+        for x in range(0, W - ww + 1, step_x):
+            wins.append((x, y, x + ww, y + wh))
+
     return wins
 
 # ── Detect ────────────────────────────────────────────────────────────
 def detect(pil_image, conf_thresh=0.55):
     W, H = pil_image.size
 
-    # Scan all windows
     raw = []
     for box in get_windows(W, H):
         crop  = pil_image.crop(box)
@@ -454,10 +525,13 @@ def detect(pil_image, conf_thresh=0.55):
                 'top3': [(selected[j], round(float(prob[j])*100, 1)) for j in top3_i]
             })
 
-    # NMS removes overlapping duplicates
-    kept = nms(raw, iou_thresh=0.45)
+    # Step 1: class-aware NMS
+    kept = nms(raw, iou_thresh=0.30)
 
-    # Fallback: nothing detected — use full image top prediction
+    # Step 2: one label per food type, highest confidence wins
+    kept = deduplicate_by_class(kept)
+
+    # Fallback: nothing passed threshold — use full image best guess
     if not kept:
         prob   = predict_single(pil_image)
         top_i  = int(np.argmax(prob))
@@ -567,7 +641,4 @@ def predict():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 7860))
     app.run(host='0.0.0.0', port=port)
-
-
-
 
